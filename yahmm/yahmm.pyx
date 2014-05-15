@@ -2497,7 +2497,13 @@ cdef class Model(object):
 			for i in xrange( self.silent_start ):
 				s = <State>self.states[i]
 				d = <Distribution>(s.distribution)
-				p = d.log_probability( sequence[k] )
+
+				#Draizen Addition; Higher order Markov Chains
+				if hasattr(d, "order") and k >= d.order:
+					p = d.log_probability( sequence[k-d.order:k+1] )
+				else:
+					p = d.log_probability( sequence[k] )
+
 				e[k, i] = p
 
 		# We catch when we trace back to (0, self.start_index), so we don't need
