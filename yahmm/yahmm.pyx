@@ -176,16 +176,17 @@ cdef class Distribution(object):
 			
 		# Break it into parts. The first part is the name of the distribution 
 		# and the other parts are parameters.    
-		parts = line.strip().split()
+		parts = line.strip().split(None, 1)
 		if not REGISTRY.has_key(parts[0]):
 			raise Exception("Unknown distribution: {}".format(parts[0]))
 		
 		# Get the class to use
 		distribution_class = REGISTRY[parts[0]]
-		
+
 		# Make a list of float parameters
-		parameters = [float(s) for s in parts[1:]]
-		
+		print parts[1]
+		parameters = [eval(parts[1])] #Bad idea, but works for testing while parsing is rewritten
+		print parameters
 		# Instantiate and return the distribution, by passing all the parameters
 		# in order to the appropriate constructor.
 		return distribution_class(*parameters)
@@ -1833,6 +1834,56 @@ cdef class Model(object):
 		# We made it to the end state. Return our emission sequence.
 		return (emissions, sequence_path) if path else emissions
 
+	def consensus (self, path=False ):
+		'''
+		'''
+		# First prepare a table of cumulative transition probabilities.
+		# Get the probabilities of all the transitions
+		transition_probabilities = exp(self.transition_log_probabilities)
+		
+		# Calculate cumulative transition probabilities
+		cum_probabilities = numpy.cumsum(transition_probabilities, 
+			axis=1)
+		
+		# This holds the numerical index of the state we are currently in.
+		# Start in the start state
+		state = self.start_index
+		
+		# Record the number of samples
+		n = 0
+		# This holds the emissions
+		emissions = []
+		sequence_path = []
+
+		while state != self.end_index:
+			# Get the object associated with this state
+			state_object = self.states[state]
+
+			# Add the state to the growing path
+			sequence_path.append( state_object )
+			
+			if state_object.distribution is not None:
+				# There's an emission distribution, so sample from it
+				emissions.append(max(state_object.distribution.iteritem(), 
+					key=lambda x:x[1])[0])
+				n += 1
+
+			# What should we pick as our next state?
+			# Generate a random number between 0 and the total probability of 
+			# this state (ought to be 1):
+			sample = random.uniform(0, cum_probabilities[state, -1])
+			
+			# Save the last state id we were in
+			last_state = state
+
+			# Find out what state we're supposed to go into using bisect, and go
+			# there
+			state = numpy.amax(cum_probabilities[state, :])
+			
+		# We made it to the end state. Return our emission sequence.
+		return (emissions, sequence_path) if path else emissions
+
+
 	def forward( self, sequence ):
 		'''
 		Python wrapper for the forward algorithm, calculating probability by
@@ -1894,7 +1945,13 @@ cdef class Model(object):
 			for i in xrange( self.silent_start ):
 				s = <State>self.states[i]
 				d = <Distribution>(s.distribution)
-				log_probability = d.log_probability( sequence[k] )
+
+				#Draizen Addition; Higher order Markov Chains emissions
+				if hasattr(d, "order") and k >= d.order:
+					log_probability = d.log_probability( sequence[k-d.order:k+1] )
+				else:
+					log_probability = d.log_probability( sequence[k] )
+
 				e[k, i] = log_probability
 
 		# We must start in the start state, having emitted 0 symbols        
@@ -2070,7 +2127,13 @@ cdef class Model(object):
 			for i in xrange( self.silent_start ):
 				s = <State>self.states[i]
 				d = <Distribution>(s.distribution)
-				log_probability = d.log_probability( sequence[k] )
+
+				#Draizen Addition; Higher order Markov Chains emissions
+				if hasattr(d, "order") and k >= d.order:
+					log_probability = d.log_probability( sequence[k-d.order:k+1] )
+				else:
+					log_probability = d.log_probability( sequence[k] )
+				
 				e[k, i] = log_probability
 
 		# We must end in the end state, having emitted len(sequence) symbols
@@ -2296,7 +2359,7 @@ cdef class Model(object):
 		Actually perform the math here.
 		"""
 
-		cdef int i, k, l
+		cdef int i, k, l, e
 		cdef int m = len( self.states ), n = len( sequence )
 		cdef double [:,:] transition_log_probabilities = \
 			numpy.array( self.transition_log_probabilities ) 
@@ -2308,6 +2371,7 @@ cdef class Model(object):
 
 		cdef double log_sequence_probability, sequence_probability_sum
 		cdef double log_transition_emission_probability_sum
+		cdef double log_probability #Draizen addition
 
 		# Get the overall log probability of the sequence, and fill in self.f
 		f = self.forward( sequence )
@@ -2340,11 +2404,20 @@ cdef class Model(object):
 					# Add probability that we start and get up to state k, 
 					# and go k->l, and emit the symbol from l, and go from l
 					# to the end.
+
+					#Draizen Addition; Higher order Markov Chains emissions
+					if (hasattr(self.states[l].distribution, "order") and 
+					 k >= self.states[l].distribution.order):
+						log_probability = self.states[l].distribution.log_probability( 
+								sequence[i-self.states[l].distribution.order:i+1] )
+					else:
+						log_probability = self.states[l].distribution.log_probability( 
+								sequence[i] )
+
 					log_transition_emission_probability_sum = pair_lse( 
 						log_transition_emission_probability_sum, 
 						f[i, k] + transition_log_probabilities[k, l] +
-						self.states[l].distribution.log_probability( 
-							sequence[i] ) + b[ i+1, l ] )
+						log_probability + b[ i+1, l ] )
 
 				# Now divide by probability of the sequence to make it given
 				# this sequence, and add as this sequence's contribution to 
@@ -3004,8 +3077,13 @@ cdef class Model(object):
 			c = numpy.zeros( (n+1 ) )
 			for k in xrange( n ):
 				for i in xrange( self.silent_start ):
-					e[k, i] = self.states[i].distribution.log_probability(
-						sequence[k] )
+					if (hasattr(self.states[i].distribution, "order") and 
+					 k >= self.states[i].distribution.order):
+						e[k, i] = self.states[i].distribution.log_probability( 
+							sequence[k-self.states[i].distribution.order:k+1] )
+					else:
+						e[k, i] = self.states[i].distribution.log_probability( 
+							sequence[k] )
 
 			# Get the overall log probability of the sequence, and fill in self.f
 
